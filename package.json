@@ -1,20 +1,12 @@
 {
   "name": "mcp-woocommerce",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.20.2",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "undici": "^7.16.0",
-    "zod": "^3.25.76"
+    "@modelcontextprotocol/sdk": "^0.3.0",
+    "express": "^4.19.2"
   }
 }
