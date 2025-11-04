@@ -1,56 +1,97 @@
-#!/usr/bin/env node
-import express from 'express';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+// server.js
+import express from "express";
+import cors from "cors";
 
-/* ---------- Minimal MCP server ---------- */
-const server = new McpServer({ name: 'woo-mcp', version: '1.0.0' });
+// ----- Config -----
+const PORT = process.env.PORT || 10000;
+// Your WP MCP “streamable” endpoint:
+const TARGET_STREAM_URL =
+  process.env.TARGET_STREAM_URL ||
+  "https://africancreationsbaskets.com/wp-json/wp/v2/wpmcp/streamable";
 
-server.tool(
-  'ping',
-  { description: 'Health check', inputSchema: { type: 'object', properties: {} } },
-  async () => ({ content: [{ type: 'text', text: 'pong' }] })
-);
+// Optional: put a JWT here if your WP MCP requires it (leave empty for read-only)
+const BEARER = process.env.BEARER || "";
 
-server.tool(
-  'time',
-  { description: 'Server time (ISO)', inputSchema: { type: 'object', properties: {} } },
-  async () => ({ content: [{ type: 'text', text: new Date().toISOString() }] })
-);
-
-/* ---------- HTTP + SSE routing (robust) ---------- */
+// ----- App -----
 const app = express();
+app.use(cors());
+app.use(express.json({ limit: "2mb" }));
 
-// Helpful headers for proxies and SSE
+// Healthcheck
+app.get("/health", (_req, res) => res.status(200).send("ok"));
+
+// Some clients probe these; use safe, non-wildcard handlers
+app.use("/.well-known", (_req, res) => res.sendStatus(404));
 app.use((req, res, next) => {
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('X-Accel-Buffering', 'no');
-  next();
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  return next();
 });
 
-// Some clients probe these; avoid failing the connector creation
-app.use('/.well-known', (req, res) => res.sendStatus(404)); // <-- no wildcard, prefix match
-app.options('*', (req, res) => res.sendStatus(204));
-app.post('*', (req, res) => res.sendStatus(200));
+// SSE proxy endpoint for ChatGPT connector
+app.post("/sse", async (req, res) => {
+  try {
+    const headers = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+    if (BEARER) headers["Authorization"] = `Bearer ${BEARER}`;
 
-async function handleSse(req, res) {
-  console.log('🔌 SSE connection received');
-  // Current SDK signature is (req, res)
-  const transport = new SSEServerTransport(req, res);
-  await server.connect(transport);
-}
+    // Forward the JSON-RPC body as-is
+    const body = JSON.stringify(req.body ?? {});
 
-// Serve SSE on both /sse and / (some validators hit root)
-app.get('/sse', handleSse);
-app.get('/', handleSse);
+    const upstream = await fetch(TARGET_STREAM_URL, {
+      method: "POST",
+      headers,
+      body,
+    });
 
-/* ---------- Start HTTP server (long timeouts) ---------- */
-const port = Number(process.env.PORT || 8787);
-const srv = app.listen(port, () => {
-  console.log(`✅ MCP SSE running at http://localhost:${port}/sse`);
+    // Mirror key headers so ChatGPT recognizes SSE/JSON stream
+    res.status(upstream.status);
+    const ct = upstream.headers.get("content-type") || "application/json";
+    const proto = upstream.headers.get("mcp-protocol-version") || "";
+    const transport = upstream.headers.get("x-transport-type") || "";
+
+    res.setHeader("Content-Type", ct);
+    if (proto) res.setHeader("mcp-protocol-version", proto);
+    if (transport) res.setHeader("x-transport-type", transport);
+
+    // Stream upstream body to client
+    if (!upstream.body) {
+      return res.end();
+    }
+    upstream.body.pipeTo(
+      new WritableStream({
+        write(chunk) {
+          res.write(chunk);
+        },
+        close() {
+          res.end();
+        },
+        abort() {
+          res.end();
+        },
+      })
+    ).catch(() => res.end());
+  } catch (err) {
+    console.error("Proxy error:", err);
+    res.status(502).json({
+      jsonrpc: "2.0",
+      id: req.body?.id ?? null,
+      error: { code: -32603, message: "Upstream proxy error" },
+    });
+  }
 });
-try {
-  srv.keepAliveTimeout = 0;
-  srv.headersTimeout = 0;
-  srv.requestTimeout = 0;
-} catch {}
+
+// Fallback GET to help you see it’s alive
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    sse: "/sse",
+    target: TARGET_STREAM_URL,
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`MCP Bridge listening on :${PORT}`);
+  console.log(`Forwarding to: ${TARGET_STREAM_URL}`);
+});
