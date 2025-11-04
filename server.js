@@ -29,7 +29,7 @@ app.use((req, res, next) => {
 });
 
 // Some clients probe these; avoid failing the connector creation
-app.get('/.well-known/*', (req, res) => res.sendStatus(404));
+app.use('/.well-known', (req, res) => res.sendStatus(404)); // <-- no wildcard, prefix match
 app.options('*', (req, res) => res.sendStatus(204));
 app.post('*', (req, res) => res.sendStatus(200));
 
